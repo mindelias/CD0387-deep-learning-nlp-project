@@ -7,36 +7,24 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from PIL import Image, ImageFile
 
-
 import argparse
 import os
 import sys
 import logging
 
-# SageMaker Debugging and Profiling imports
-import smdebug.pytorch as smd
-from smdebug import modes
-from smdebug.profiler.utils import str2bool
-
-
 # CRITICAL FIX: Enable loading of truncated/corrupted images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
 
 # Set up logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
-def test(model, test_loader, criterion, hook):
+def test(model, test_loader, criterion):
     '''
-    Test function with debugging hooks
-    The hook will capture information about what's happening during testing
+    Test function WITHOUT debugging hooks
     '''
     print("Testing Model on Whole Testing Dataset")
-    
-    # Tell the hook we're in evaluation mode
-    hook.set_mode(modes.EVAL)
     
     model.eval()
     running_loss = 0
@@ -59,18 +47,15 @@ def test(model, test_loader, criterion, hook):
     
     return total_acc
 
-def train(model, train_loader, criterion, optimizer, epochs, hook):
+def train(model, train_loader, criterion, optimizer, epochs):
     '''
-    Training function with debugging hooks
-    The hook captures training metrics like loss, gradients, and weights
+    Training function WITHOUT debugging hooks
     '''
     print("Training Model...")
     
     for epoch in range(epochs):
         print(f"Epoch {epoch+1}/{epochs}")
         
-        # Tell the hook we're in training mode
-        hook.set_mode(modes.TRAIN)
         model.train()
         
         running_loss = 0.0
@@ -102,7 +87,7 @@ def train(model, train_loader, criterion, optimizer, epochs, hook):
 
 def net(num_classes):
     '''
-    Create model - same as before but with debugging support
+    Create model - clean version without debugging
     '''
     print("Creating Model...")
     
@@ -119,7 +104,7 @@ def net(num_classes):
 
 def create_data_loaders(data_dir, batch_size):
     '''
-    Create data loaders - same as before
+    Create data loaders
     '''
     print("Creating Data Loaders...")
     
@@ -148,11 +133,6 @@ def create_data_loaders(data_dir, batch_size):
         os.path.join(data_dir, 'test'), 
         transform=test_transform
     )
-
-    # (Optional) visibility—these end up in CloudWatch
-    print(f"num_classes(train)={len(train_map)}")
-    if len(test_dataset.targets):
-        print(f"max_test_target={max(test_dataset.targets)}")
     
     train_loader = torch.utils.data.DataLoader(
         train_dataset, 
@@ -170,25 +150,21 @@ def create_data_loaders(data_dir, batch_size):
 
 def main(args):
     '''
-    Main function with debugging and profiling hooks
+    Main function WITHOUT debugging and profiling hooks
     '''
-    print("Starting Training with Debugging and Profiling...")
-    
-    # Create debugging hook
-    # This is like attaching sensors to monitor your model
-    hook = smd.Hook.create_from_json_file()
+    print("Starting Clean Training (No SMDebug)...")
     
     # Get number of classes
     sample_loader, _ = create_data_loaders(args.data_dir, 32)
     num_classes = len(sample_loader.dataset.classes)
     print(f"Number of classes: {num_classes}")
     
+    # Save class names for inference
+    class_names = sample_loader.dataset.classes
+    print(f"Classes: {class_names}")
+    
     # Initialize model
     model = net(num_classes)
-    
-    # Register the model with the hook
-    # This tells the hook to monitor this model
-    hook.register_hook(model)
     
     # Create data loaders
     train_loader, test_loader = create_data_loaders(args.data_dir, args.batch_size)
@@ -197,29 +173,34 @@ def main(args):
     loss_criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.fc.parameters(), lr=args.lr)
     
-    # Register optimizer with hook
-    hook.register_loss(loss_criterion)
-    
     # Train the model
-    model = train(model, train_loader, loss_criterion, optimizer, args.epochs, hook)
+    model = train(model, train_loader, loss_criterion, optimizer, args.epochs)
     
     # Test the model
-    test_accuracy = test(model, test_loader, loss_criterion, hook)
+    test_accuracy = test(model, test_loader, loss_criterion)
     
-    # Save the model
+    # Save ONLY the state dict (weights) - no model object with hooks
     model_path = os.path.join(args.model_dir, 'model.pth')
     torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
+    print(f"Model state dict saved to {model_path}")
     
-    # Also save the complete model for inference
-    inference_model_path = os.path.join(args.model_dir, 'model_complete.pth')
-    torch.save(model, inference_model_path)
-    print(f"Complete model saved to {inference_model_path}")
+    # Save class information for inference
+    import json
+    metadata = {
+        'num_classes': num_classes,
+        'class_names': class_names
+    }
+    metadata_path = os.path.join(args.model_dir, 'metadata.json')
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f)
+    print(f"Metadata saved to {metadata_path}")
+    
+    print("Training complete - model saved without SMDebug dependencies!")
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
     
-    # Hyperparameters (use best ones from tuning)
+    # Hyperparameters
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=3)
